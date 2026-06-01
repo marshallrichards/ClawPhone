@@ -107,7 +107,24 @@ The patcher scans the `google_malloc` section and rewrites the relevant ARM64 in
 - the mmap upper bound changes from `1 << 48` to `1 << 39`
 - inlined tag and deallocation masks are rewritten for the lower VA layout
 
-The scanner is pattern-based instead of offset-based, so it can survive ordinary binary layout changes. If critical patterns disappear, it fails instead of pretending the binary is safe.
+The scanner is pattern-based instead of offset-based, so it can survive ordinary binary layout changes. Before it writes the patched binary, it now requires the input SHA256 and observed patch counts to match a known compatibility profile.
+
+The current profile is for Antigravity CLI `1.0.3` `linux_arm64`:
+
+```text
+input SHA256: 71d038c419221f858db992348e849e10263df9b67d37d13cff3515aef3cf7dea
+```
+
+```text
+ubfx patches: 15
+lsl patches: 2
+random mask pairs: 3
+mmap upper-bound patches: 1
+faccessat2 syscall rewrites: 1
+tag constants: 108
+```
+
+If the binary SHA or counts drift, the script prints the input SHA256 and observed counts, then refuses to write `agy.va39`. Update the patch profile for the new release, or set `AGENTPHONE_AGY_ALLOW_UNVERIFIED_PATCH=1` only if you have manually reviewed the new binary and want to test an unverified profile.
 
 ### 4. `faccessat2` Syscall Patch
 
@@ -176,7 +193,7 @@ That fixes HTTPS verification for login and API calls.
 
 Bash caches command lookups. If `agy` previously pointed somewhere else, the current shell can keep launching the old target.
 
-The `agy` shell function runs `hash -r` before launching `agy-va39`.
+The `agy` shell function runs `hash -r` before launching `agy-va39`. The installer verifies `agy-va39 --version` before adding or replacing this shell hook, so a failed install does not shadow the official `agy` command for new installs.
 
 ## Why `proot` Is Used
 
@@ -232,4 +249,3 @@ If the official `~/.local/bin/agy` binary did not exist before this installer cr
 ```bash
 bash scripts/install-antigravity-termux.sh --uninstall --remove-official
 ```
-

@@ -281,7 +281,7 @@ the older faccessat syscall accepted by Android seccomp.
 """
 
 import hashlib
-import shutil
+import os
 import struct
 import sys
 from pathlib import Path
@@ -289,6 +289,23 @@ from pathlib import Path
 
 src = Path(sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / ".local/bin/agy"))
 dst = Path(str(src) + ".va39")
+
+PATCH_PROFILES = {
+    # Antigravity CLI 1.0.3 linux_arm64, from:
+    # https://storage.googleapis.com/antigravity-public/antigravity-cli/1.0.3-6260531212976128/linux-arm/cli_linux_arm64.tar.gz
+    "71d038c419221f858db992348e849e10263df9b67d37d13cff3515aef3cf7dea": {
+        "label": "Antigravity CLI 1.0.3 linux_arm64",
+        "counts": {
+            "ubfx": 15,
+            "lsl": 2,
+            "random_mask": 3,
+            "mmap_aligned": 1,
+            "tag_constants": 108,
+            "faccessat2": 1,
+        },
+    },
+}
+ALLOW_UNVERIFIED = os.environ.get("AGENTPHONE_AGY_ALLOW_UNVERIFIED_PATCH") == "1"
 
 if not src.exists():
     raise SystemExit(f"Input binary does not exist: {src}")
@@ -301,12 +318,12 @@ if original[4] != 2 or original[5] != 1:
 if struct.unpack_from("<H", original, 18)[0] != 183:
     raise SystemExit("Input ELF is not AArch64/ARM64")
 
+input_sha = hashlib.sha256(original).hexdigest()
 print(f"Input binary : {src}")
-print(f"SHA256 in    : {hashlib.sha256(original).hexdigest()}")
+print(f"SHA256 in    : {input_sha}")
 print()
 
-shutil.copyfile(src, dst)
-data = bytearray(dst.read_bytes())
+data = bytearray(original)
 
 
 def get(off):
@@ -434,36 +451,61 @@ for off in range(0, len(data) - 15, 4):
 
 print(f"[5] faccessat2   : {faccessat2_count} syscall wrapper rewritten")
 
+observed_counts = {
+    "ubfx": ubfx_count,
+    "lsl": lsl_count,
+    "random_mask": mask_count,
+    "mmap_aligned": mmap_count,
+    "tag_constants": tag_count,
+    "faccessat2": faccessat2_count,
+}
+
+total = sum(observed_counts.values())
+if total == 0:
+    print()
+    print("ERROR: No patches applied - binary structure may have changed.")
+    print(f"Input SHA256: {input_sha}")
+    print("Refusing to write the patched binary.")
+    raise SystemExit(2)
+
+profile_errors = []
+profile = PATCH_PROFILES.get(input_sha)
+if profile is None:
+    profile_errors.append(f"unknown input SHA256: {input_sha}")
+else:
+    for name, expected in profile["counts"].items():
+        observed = observed_counts[name]
+        if observed != expected:
+            profile_errors.append(f"{name}: expected {expected}, observed {observed}")
+profile_verified = not profile_errors
+
+if profile_errors:
+    print()
+    print("ERROR: Patch counts do not match the expected compatibility profile.")
+    for error in profile_errors:
+        print(f"  - {error}")
+    print("Observed patch counts:")
+    for name, observed in observed_counts.items():
+        print(f"  - {name}: {observed}")
+    print(f"Input SHA256: {input_sha}")
+    print("Refusing to write the patched binary.")
+    if not ALLOW_UNVERIFIED:
+        print("Update PATCH_PROFILES or set AGENTPHONE_AGY_ALLOW_UNVERIFIED_PATCH=1 only after manual review.")
+        raise SystemExit(3)
+    print("AGENTPHONE_AGY_ALLOW_UNVERIFIED_PATCH=1 is set; writing output anyway.")
+
 dst.write_bytes(data)
 dst.chmod(0o755)
 
-out_sha = hashlib.sha256(dst.read_bytes()).hexdigest()
+out_sha = hashlib.sha256(data).hexdigest()
 print()
 print(f"SHA256 out   : {out_sha}")
 print(f"Output       : {dst}")
 print()
-
-total = ubfx_count + lsl_count + mask_count + mmap_count + tag_count + faccessat2_count
-if total == 0:
-    print("ERROR: No patches applied - binary structure may have changed.")
-    print("Do not use the output binary.")
-    try:
-        dst.unlink()
-    except FileNotFoundError:
-        pass
-    raise SystemExit(2)
-
-if ubfx_count == 0 or mask_count == 0:
-    print("ERROR: Critical VA39 patch patterns were not found.")
-    print("The output may be incomplete; refusing to treat it as installed.")
-    raise SystemExit(3)
-
-if mmap_count == 0:
-    print("WARNING: MmapAligned upper-bound pattern was not found.")
-if faccessat2_count == 0:
-    print("WARNING: faccessat2 wrapper pattern was not found. This can be OK if the binary changed.")
-
-print("Patch looks complete. Test with:")
+if not profile_verified:
+    print("Unverified patch profile accepted by override. Test with:")
+else:
+    print(f"Patch profile accepted: {profile['label']}. Test with:")
 print()
 print("  agy-va39 --version")
 PY
@@ -645,8 +687,8 @@ install() {
   patch_agy
   create_glibc_shim
   create_wrapper
-  install_shell_shortcuts
   verify_install
+  install_shell_shortcuts
 
   log ""
   ok "Done. Open a new shell or run: source ~/.bashrc"
